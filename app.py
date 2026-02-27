@@ -16,7 +16,9 @@ GATEWAY_KEY = os.environ["GATEWAY_API_KEY"]
 
 mcp = FastMCP(
     "K-AI Gateway",
-    description="Unified gateway to all services: Paperless, Firefly, Coolify, GitHub, Nextcloud, Outline, n8n"
+    description="Unified gateway to all services: Paperless, Firefly, Coolify, GitHub, Nextcloud, Outline, n8n",
+    host="0.0.0.0",
+    port=8000,
 )
 
 headers = {"X-Gateway-Key": GATEWAY_KEY}
@@ -70,4 +72,4 @@ async def gateway_execute(service: str, action: str, params: dict | None = None,
 
 
 if __name__ == "__main__":
-    mcp.run(transport="sse", host="0.0.0.0", port=8000)
+    mcp.run(transport="sse")
