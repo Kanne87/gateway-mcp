@@ -1,0 +1,1 @@
+FROM python:3.12-slim\n\nRUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*\n\nWORKDIR /app\nCOPY requirements.txt .\nRUN pip install --no-cache-dir -r requirements.txt\nCOPY app.py .\n\nEXPOSE 8000\nCMD ["python", "app.py"]\n
