@@ -5,6 +5,9 @@ Replaces 170+ individual MCP tool definitions with:
   1. gateway_services - list all available services
   2. gateway_service - get detail for one service
   3. gateway_execute - execute any endpoint on any service
+
+Description: Unified gateway to all services - Paperless, Firefly, Coolify,
+GitHub, Nextcloud, Outline, n8n, etc.
 """
 
 import os
@@ -14,12 +17,7 @@ from mcp.server.fastmcp import FastMCP
 GATEWAY_URL = os.environ.get("GATEWAY_URL", "https://api-gateway.kailohmann.de")
 GATEWAY_KEY = os.environ["GATEWAY_API_KEY"]
 
-mcp = FastMCP(
-    "K-AI Gateway",
-    description="Unified gateway to all services: Paperless, Firefly, Coolify, GitHub, Nextcloud, Outline, n8n",
-    host="0.0.0.0",
-    port=8000,
-)
+mcp = FastMCP("K-AI Gateway")
 
 headers = {"X-Gateway-Key": GATEWAY_KEY}
 
@@ -72,4 +70,4 @@ async def gateway_execute(service: str, action: str, params: dict | None = None,
 
 
 if __name__ == "__main__":
-    mcp.run(transport="sse")
+    mcp.run(transport="sse", host="0.0.0.0", port=8000)
