@@ -9,6 +9,7 @@ Replaces 170+ individual MCP tool definitions with:
 
 import os
 import httpx
+from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 GATEWAY_URL = os.environ.get("GATEWAY_URL", "https://api-gateway.kailohmann.de")
@@ -25,7 +26,7 @@ headers = {"X-Gateway-Key": GATEWAY_KEY}
 
 
 @mcp.tool()
-async def gateway_services() -> dict:
+async def gateway_services() -> dict[str, Any]:
     """List all available services and their endpoints.
     Call this first to discover what actions are available.
     Returns a map of service_id -> {name, endpoints: {action_id -> {method, params, accepts_body}}}
@@ -37,7 +38,7 @@ async def gateway_services() -> dict:
 
 
 @mcp.tool()
-async def gateway_service(service: str) -> dict:
+async def gateway_service(service: str) -> dict[str, Any]:
     """Get detailed info about a specific service and its available endpoints.
 
     Args:
@@ -50,7 +51,7 @@ async def gateway_service(service: str) -> dict:
 
 
 @mcp.tool()
-async def gateway_execute(service: str, action: str, params: dict | None = None, body: dict | None = None) -> dict:
+async def gateway_execute(service: str, action: str, params: dict | None = None, body: dict | None = None) -> dict[str, Any]:
     """Execute an action on a service through the gateway.
 
     Args:
