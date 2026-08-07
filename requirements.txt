@@ -1,3 +1,7 @@
-mcp[cli]>=1.2.0
-httpx>=0.27.0
-uvicorn>=0.34.0
+# Obergrenzen sind PFLICHT (S2256): mcp 2.0.0 (28.07.2026) hat mcp.server.fastmcp
+# entfernt — genau der Import in app.py. Ohne Deckel haette der naechste beliebige
+# Rebuild diesen Dienst in den Crash-Loop geschickt, wie bei kg-mcp geschehen.
+# Beim Anheben einer Major-Grenze vorher den Import gegen die neue Version testen.
+mcp[cli]>=1.2.0,<2
+httpx>=0.27.0,<1
+uvicorn>=0.34.0,<1
