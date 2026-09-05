@@ -1,1 +1,1 @@
-__pycache__/\n*.pyc\n.env\n.venv/\n
+__pycache__/\n*.pyc\n.env\n.venv/\ntests/__pycache__/
