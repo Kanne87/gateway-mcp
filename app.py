@@ -51,11 +51,11 @@ def check_upload(
                     "size_chars": len(val),
                     "limit": lim,
                     "hint": (
-                        "Datei im Container erzeugen und per Kanal B senden: "
-                        "gw up <lokal> <nc-pfad>   "
-                        "(Fallback: curl -sf -H 'X-Gateway-Key: $GW_KEY' -X POST $GW/upload "
-                        "-F service=<service> -F action=<action> -F 'params={...}' -F file=@<lokal>). "
-                        "Override nur bewusst: params.force=true."
+                        f"Zu gross fuer den Kontext ({len(val)} Zeichen, Limit {lim}). "
+                        "Textdateien: bewusst mit params.force=true hochladen. "
+                        "Binaerdateien nicht als base64 durch den Kontext schicken, sondern serverseitig erzeugen und ablegen "
+                        "(Knoten service_cheatsheet, Feld sandbox_direktweg). "
+                        "Kanal B (gw up) nur, wo verfuegbar."
                     ),
                 }
     return None
@@ -74,10 +74,10 @@ def gate_download(
     n = len(data)
     path_hint = path if path else "<nc-pfad>"
     hint = (
-        f"Bytes per Kanal B holen: gw down {path_hint} -o <lokal>   "
-        "(Fallback: POST $GW/download mit demselben JSON-Body, streamt rohe Bytes; "
-        "oder /execute + base64-Decode im Container). "
-        "Override nur bewusst: params.force=true."
+        f"Datei zu gross fuer den Kontext (~{n * 3 // 4} Bytes). "
+        "Inhalt serverseitig lesen (Lese-Sandbox laut dokument_lesen_ops_playbook, mistral.ocr) statt Bytes zu holen; "
+        "Volltext nur bewusst mit params.force=true. "
+        f"Kanal B (gw down {path_hint}) nur, wo verfuegbar."
     )
     return {
         **resp,
@@ -126,8 +126,9 @@ async def gateway_execute(service: str, action: str, params: dict | None = None,
         params: URL/path parameters as key-value pairs (e.g. {"id": "123", "page_size": 10})
         body: Request body for POST/PUT/PATCH endpoints (e.g. {"title": "New doc"})
 
-    Grosse Uploads/Downloads werden abgelehnt (gated) — dann Kanal B (gw up / gw down) nutzen;
-    params.force=true ist der bewusste Override.
+    Grosse Uploads/Downloads werden abgelehnt (gated). Dann serverseitig arbeiten
+    (Knoten service_cheatsheet, Feld sandbox_direktweg); Textdateien bewusst mit params.force=true.
+    Kanal B (gw up / gw down) nur, wo verfuegbar.
     """
     force = False
     if params and params.get("force") is True:

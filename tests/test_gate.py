@@ -1,10 +1,12 @@
 """Functional tests for the upload/download gate logic in app.py."""
 
+import asyncio
 import os
+from unittest.mock import AsyncMock, MagicMock, patch
 
 os.environ.setdefault("GATEWAY_API_KEY", "test-key")
 
-from app import check_upload, gate_download  # noqa: E402
+from app import check_upload, gate_download, gateway_execute  # noqa: E402
 
 LIMIT_UP = 100
 LIMIT_DN = 200
@@ -36,7 +38,12 @@ def test_upload_gate_content_in_params():
     assert result["field"] == "content"
     assert result["size_chars"] == len(LONG)
     assert result["limit"] == LIMIT_UP
+    assert "force=true" in result["hint"]
+    assert "service_cheatsheet" in result["hint"]
+    assert "sandbox_direktweg" in result["hint"]
     assert "gw up" in result["hint"]
+    assert str(len(LONG)) in result["hint"]
+    assert str(LIMIT_UP) in result["hint"]
 
 
 def test_upload_gate_content_text_in_body():
@@ -112,7 +119,11 @@ def test_download_gate_large_base64():
     assert result["size_base64_chars"] == len(LONG_DN)
     assert result["approx_bytes"] == len(LONG_DN) * 3 // 4
     assert result["limit"] == LIMIT_DN
+    assert "force=true" in result["hint"]
+    assert "mistral.ocr" in result["hint"]
+    assert "dokument_lesen_ops_playbook" in result["hint"]
     assert "gw down" in result["hint"]
+    assert str(len(LONG_DN) * 3 // 4) in result["hint"]
 
 
 def test_download_gate_preserves_other_fields():
@@ -148,3 +159,33 @@ def test_download_gate_placeholder_when_no_path():
 def test_download_pass_when_no_data_field():
     resp = {"encoding": "base64", "status_code": 200}
     assert gate_download(resp, limit=LIMIT_DN) is resp
+
+
+# ---------------------------------------------------------------------------
+# gateway_execute — force stripping
+# ---------------------------------------------------------------------------
+
+
+def test_force_stripped_from_gateway_payload():
+    """force=True bypasses gates and must not be forwarded to the gateway."""
+    captured = {}
+
+    async def _run():
+        resp_mock = MagicMock()
+        resp_mock.raise_for_status.return_value = None
+        resp_mock.json.return_value = {"encoding": "utf-8", "data": "ok"}
+
+        client_mock = AsyncMock()
+        client_mock.post = AsyncMock(return_value=resp_mock)
+
+        with patch("app.httpx.AsyncClient") as MockClient:
+            MockClient.return_value.__aenter__ = AsyncMock(return_value=client_mock)
+            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+            await gateway_execute("svc", "act", params={"force": True, "id": "7"})
+
+        _, kwargs = client_mock.post.call_args
+        captured.update(kwargs["json"])
+
+    asyncio.run(_run())
+    assert "force" not in captured.get("params", {})
+    assert captured["params"] == {"id": "7"}
