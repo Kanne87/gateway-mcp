@@ -36,7 +36,12 @@ def test_upload_gate_content_in_params():
     assert result["field"] == "content"
     assert result["size_chars"] == len(LONG)
     assert result["limit"] == LIMIT_UP
+    assert "force=true" in result["hint"]
+    assert "service_cheatsheet" in result["hint"]
+    assert "sandbox_direktweg" in result["hint"]
     assert "gw up" in result["hint"]
+    assert str(len(LONG)) in result["hint"]
+    assert str(LIMIT_UP) in result["hint"]
 
 
 def test_upload_gate_content_text_in_body():
@@ -112,7 +117,11 @@ def test_download_gate_large_base64():
     assert result["size_base64_chars"] == len(LONG_DN)
     assert result["approx_bytes"] == len(LONG_DN) * 3 // 4
     assert result["limit"] == LIMIT_DN
+    assert "force=true" in result["hint"]
+    assert "mistral.ocr" in result["hint"]
+    assert "dokument_lesen_ops_playbook" in result["hint"]
     assert "gw down" in result["hint"]
+    assert str(len(LONG_DN) * 3 // 4) in result["hint"]
 
 
 def test_download_gate_preserves_other_fields():
