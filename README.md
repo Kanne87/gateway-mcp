@@ -17,7 +17,7 @@ Felder `content_text`, `content_base64`, `content`, `body` in `params` oder `bod
   "field": "content_base64",
   "size_chars": 52000,
   "limit": 4096,
-  "hint": "gw up <lokal> <nc-pfad> ..."
+  "hint": "Zu gross fuer den Kontext (52000 Zeichen, Limit 4096). Textdateien: bewusst mit params.force=true hochladen. Binaerdateien nicht als base64 durch den Kontext schicken, sondern serverseitig erzeugen und ablegen (Knoten service_cheatsheet, Feld sandbox_direktweg). Kanal B (gw up) nur, wo verfuegbar."
 }
 ```
 
@@ -32,7 +32,7 @@ Antwortet das Gateway mit `encoding == "base64"` und `len(data) > Limit`, wird `
   "size_base64_chars": 120000,
   "approx_bytes": 90000,
   "limit": 8192,
-  "hint": "gw down /Documents/file.pdf -o /tmp/file.pdf ...",
+  "hint": "Datei zu gross fuer den Kontext (~90000 Bytes). Inhalt serverseitig lesen (Lese-Sandbox laut dokument_lesen_ops_playbook, mistral.ocr) statt Bytes zu holen; Volltext nur bewusst mit params.force=true. Kanal B (gw down /Documents/file.pdf) nur, wo verfuegbar.",
   "status_code": 200,
   "filename": "file.pdf",
   "content_type": "application/pdf"
