@@ -40,6 +40,7 @@ gateway_execute(service="claude_bridge", action="get_job", params={"job_id": "�
 |---------|----------|-----------|
 | `GATEWAY_URL` | `https://api-gateway.kailohmann.de` | öffentlicher Weg (Cloudflare) |
 | `GATEWAY_URL_INTERNAL` | leer | optionaler kurzer Weg im Docker-Netz `coolify` |
+| `GATEWAY_INTERNAL_CONNECT_TIMEOUT_SECONDS` | `5` | Connect-Timeout nur des internen Versuchs |
 
 Ist `GATEWAY_URL_INTERNAL` gesetzt, geht jeder Aufruf (`/execute`, `/services`) zuerst dorthin.
 Nur bei Verbindungsfehlern (`ConnectError` inkl. DNS, `ConnectTimeout`) folgt der Rückfall auf

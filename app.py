@@ -51,6 +51,9 @@ GATEWAY_KEY = os.environ["GATEWAY_API_KEY"]
 # httpx timeout fuer gateway_execute (s), Default 90: > Gateway ssh 10+60 s, < Cloudflare 100 s
 GATEWAY_TIMEOUT_SECONDS = float(os.environ.get("GATEWAY_TIMEOUT_SECONDS", "90"))
 SERVICES_TIMEOUT_SECONDS = 30.0
+# Connect-Timeout nur fuer den internen Versuch: ein toter interner Weg soll den
+# Rueckfall nicht erst nach dem vollen Lese-Budget ausloesen.
+INTERNAL_CONNECT_TIMEOUT_SECONDS = float(os.environ.get("GATEWAY_INTERNAL_CONNECT_TIMEOUT_SECONDS", "5"))
 ERROR_TEXT_MAX_CHARS = 500
 
 GATE_ENABLED = os.environ.get("GATE_ENABLED", "true").lower() != "false"
@@ -242,10 +245,14 @@ async def _request(method: str, path: str, *, timeout: float, **kwargs: Any) -> 
     """Send a request, internal URL first, public URL on connect errors only."""
     targets = _targets()
     for i, base in enumerate(targets):
+        has_fallback = i + 1 < len(targets)
+        t: float | httpx.Timeout = (
+            httpx.Timeout(timeout, connect=min(INTERNAL_CONNECT_TIMEOUT_SECONDS, timeout)) if has_fallback else timeout
+        )
         try:
-            return await _get_client(base).request(method, path, timeout=timeout, **kwargs)
+            return await _get_client(base).request(method, path, timeout=t, **kwargs)
         except _FALLBACK_ERRORS as e:
-            if i + 1 >= len(targets):
+            if not has_fallback:
                 raise
             log.warning(
                 "gateway-mcp: interner Weg %s nicht erreichbar (%s: %s), Rueckfall auf %s",

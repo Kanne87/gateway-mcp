@@ -64,6 +64,21 @@ def test_fallback_to_public_on_connect_error(routed, exc, caplog):
     assert any("Rueckfall" in r.message for r in caplog.records)
 
 
+def test_internal_connect_timeout_short(routed):
+    seen = {}
+
+    def capture(name):
+        def h(request):
+            seen[name] = request.extensions["timeout"]
+            return _ok(request)
+        return h
+
+    routed["handlers"] = {INTERNAL: capture("int")}
+    _exec()
+    assert seen["int"]["connect"] == app.INTERNAL_CONNECT_TIMEOUT_SECONDS == 5
+    assert seen["int"]["read"] == app.GATEWAY_TIMEOUT_SECONDS
+
+
 def test_no_fallback_on_read_timeout(routed):
     def slow(request):
         raise httpx.ReadTimeout("timed out", request=request)
