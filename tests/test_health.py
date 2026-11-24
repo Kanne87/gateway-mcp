@@ -1,7 +1,6 @@
 """/health: Liveness ohne Auth, ohne Upstream-Call."""
 
 import httpx
-import pytest
 from starlette.testclient import TestClient
 
 import app
@@ -13,7 +12,7 @@ def test_health_ok_without_upstream(monkeypatch):
 
     monkeypatch.setattr(app, "_request", boom)
     monkeypatch.setattr(httpx.AsyncClient, "send", boom)
-    with TestClient(app.build_app()) as c:
-        r = c.get("/health")
+    # ohne Kontextmanager: kein Lifespan, der Session-Manager (nur einmal startbar) bleibt unberuehrt
+    r = TestClient(app.build_app()).get("/health")
     assert r.status_code == 200
     assert r.json() == {"status": "ok"}
