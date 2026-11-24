@@ -14,18 +14,46 @@ Der Proxy wartet also laenger als das laengste Gateway-Budget, damit dessen saub
 504-Antwort beim Client ankommt, bleibt aber unter der Cloudflare-Grenze.
 Timeouts und HTTP-Fehler kommen als Umschlag-Dict zurueck, nicht als Exception
 (ein leeres 'Error:' im MCP-Client war vorher das Bild eines Proxy-Timeouts).
+
+Weg zum Gateway (S4214):
+  GATEWAY_URL_INTERNAL (optional, z. B. http://<container>:8000 im Docker-Netz 'coolify')
+  wird zuerst versucht. Nur bei Verbindungsfehlern (ConnectError, ConnectTimeout, DNS) folgt
+  ein Rueckfall auf GATEWAY_URL (oeffentlich), mit Log-Zeile. Bei ReadTimeout gibt es NIE einen
+  Rueckfall: der Aufruf ist dann schon beim Gateway angekommen, ein zweiter Versuch wuerde ihn
+  doppelt ausfuehren.
+  Je Ziel-URL gibt es genau einen httpx.AsyncClient mit Keep-Alive (lazy erzeugt, im Lifespan
+  geschlossen), statt je Aufruf einen neuen TLS-Handshake.
+
+Transporte (beide im selben Prozess, Port 8000):
+  SSE:             GET /sse + POST /messages/   (claude.ai-Connector, Bridge-Jobs)
+  Streamable HTTP: POST/GET/DELETE /mcp         (stateless)
+
+fields (gateway_execute): Punkt-Pfade relativ zu data, Ganzzahl-Segmente indizieren Listen,
+fehlende Pfade -> null; data wird zu {pfad: wert}. Semantik wie gw-CLI --fields.
 """
 
+import contextlib
+import logging
 import os
-import httpx
 from typing import Any
-from mcp.server.fastmcp import FastMCP
 
-GATEWAY_URL = os.environ.get("GATEWAY_URL", "https://api-gateway.kailohmann.de")
+import httpx
+from mcp.server.fastmcp import FastMCP
+from starlette.applications import Starlette
+
+log = logging.getLogger("gateway-mcp")
+
+GATEWAY_URL = os.environ.get("GATEWAY_URL", "https://api-gateway.kailohmann.de").rstrip("/")
+# Optionaler kurzer Weg im Docker-Netz; leer = nur GATEWAY_URL
+GATEWAY_URL_INTERNAL = os.environ.get("GATEWAY_URL_INTERNAL", "").strip().rstrip("/")
 GATEWAY_KEY = os.environ["GATEWAY_API_KEY"]
 
 # httpx timeout fuer gateway_execute (s), Default 90: > Gateway ssh 10+60 s, < Cloudflare 100 s
 GATEWAY_TIMEOUT_SECONDS = float(os.environ.get("GATEWAY_TIMEOUT_SECONDS", "90"))
+SERVICES_TIMEOUT_SECONDS = 30.0
+# Connect-Timeout nur fuer den internen Versuch: ein toter interner Weg soll den
+# Rueckfall nicht erst nach dem vollen Lese-Budget ausloesen.
+INTERNAL_CONNECT_TIMEOUT_SECONDS = float(os.environ.get("GATEWAY_INTERNAL_CONNECT_TIMEOUT_SECONDS", "5"))
 ERROR_TEXT_MAX_CHARS = 500
 
 GATE_ENABLED = os.environ.get("GATE_ENABLED", "true").lower() != "false"
@@ -39,6 +67,8 @@ mcp = FastMCP(
     instructions="Unified gateway to all services: Paperless, Firefly, Coolify, GitHub, Nextcloud, Outline, n8n",
     host="0.0.0.0",
     port=8000,
+    # Stateless: keine Server-Sitzungen, die nach Abbruch oder Neustart verwaisen koennen
+    stateless_http=True,
 )
 
 headers = {"X-Gateway-Key": GATEWAY_KEY}
@@ -117,6 +147,120 @@ def _envelope(service: str, action: str, status_code: int, data: str) -> dict[st
     }
 
 
+# ---------------------------------------------------------------------------
+# fields-Projektion (gespiegelt aus gw-CLI _project)
+# ---------------------------------------------------------------------------
+
+
+def parse_fields(fields: list[str] | str | None) -> list[str] | None:
+    """Normalize fields to a list of non-empty paths; None if not set.
+
+    Accepts a list of strings or a comma separated string (like gw --fields a,b).
+    """
+    if fields is None:
+        return None
+    raw = fields.split(",") if isinstance(fields, str) else [str(f) for f in fields]
+    return [p for p in (s.strip() for s in raw) if p]
+
+
+def project(data: Any, paths: list[str]) -> dict[str, Any]:
+    """Project exactly the given paths out of data -> {pfad: wert}, in input order.
+
+    Dot notation relative to data; an integer segment indexes a list (negative
+    indices allowed, like gw). Missing path (unknown key, index out of range,
+    segment on a scalar) -> None.
+    """
+    out: dict[str, Any] = {}
+    for path in paths:
+        cur = data
+        for seg in path.split("."):
+            if isinstance(cur, dict):
+                cur = cur.get(seg)
+            elif isinstance(cur, list):
+                try:
+                    idx = int(seg)
+                except ValueError:
+                    cur = None
+                    break
+                cur = cur[idx] if -len(cur) <= idx < len(cur) else None
+            else:
+                cur = None
+                break
+        out[path] = cur
+    return out
+
+
+def apply_fields(resp: Any, paths: list[str] | None) -> Any:
+    """Replace resp['data'] by its projection; envelope stays.
+
+    Not filtered: gated responses and envelopes whose status_code is not 2xx.
+    """
+    if paths is None or not isinstance(resp, dict) or resp.get("gated"):
+        return resp
+    sc = resp.get("status_code")
+    if isinstance(sc, int) and not 200 <= sc < 300:
+        return resp
+    return {**resp, "data": project(resp.get("data"), paths)}
+
+
+# ---------------------------------------------------------------------------
+# HTTP-Clients: einer je Ziel-URL, Keep-Alive, lazy
+# ---------------------------------------------------------------------------
+
+_clients: dict[str, httpx.AsyncClient] = {}
+
+# Verbindungsfehler, bei denen der Request das Gateway sicher nicht erreicht hat.
+# DNS-Fehler kommen bei httpx als ConnectError. ReadTimeout/WriteTimeout gehoeren
+# bewusst NICHT dazu (Doppelausfuehrung).
+_FALLBACK_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout)
+
+
+def _get_client(base_url: str) -> httpx.AsyncClient:
+    client = _clients.get(base_url)
+    if client is None or client.is_closed:
+        client = httpx.AsyncClient(
+            base_url=base_url,
+            headers=headers,
+            timeout=GATEWAY_TIMEOUT_SECONDS,
+            limits=httpx.Limits(max_keepalive_connections=20, keepalive_expiry=60),
+        )
+        _clients[base_url] = client
+    return client
+
+
+async def close_clients() -> None:
+    clients = list(_clients.values())
+    _clients.clear()
+    for c in clients:
+        await c.aclose()
+
+
+def _targets() -> list[str]:
+    if GATEWAY_URL_INTERNAL and GATEWAY_URL_INTERNAL != GATEWAY_URL:
+        return [GATEWAY_URL_INTERNAL, GATEWAY_URL]
+    return [GATEWAY_URL]
+
+
+async def _request(method: str, path: str, *, timeout: float, **kwargs: Any) -> httpx.Response:
+    """Send a request, internal URL first, public URL on connect errors only."""
+    targets = _targets()
+    for i, base in enumerate(targets):
+        has_fallback = i + 1 < len(targets)
+        t: float | httpx.Timeout = (
+            httpx.Timeout(timeout, connect=min(INTERNAL_CONNECT_TIMEOUT_SECONDS, timeout)) if has_fallback else timeout
+        )
+        try:
+            return await _get_client(base).request(method, path, timeout=t, **kwargs)
+        except _FALLBACK_ERRORS as e:
+            if not has_fallback:
+                raise
+            log.warning(
+                "gateway-mcp: interner Weg %s nicht erreichbar (%s: %s), Rueckfall auf %s",
+                base, type(e).__name__, e, targets[i + 1],
+            )
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
 def _fmt_seconds(n: float) -> str:
     return str(int(n)) if float(n).is_integer() else str(n)
 
@@ -127,10 +271,9 @@ async def gateway_services() -> dict[str, Any]:
     Call this first to discover what actions are available.
     Returns a map of service_id -> {name, endpoints: {action_id -> {method, params, accepts_body}}}
     """
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.get(f"{GATEWAY_URL}/services", headers=headers)
-        r.raise_for_status()
-        return r.json()
+    r = await _request("GET", "/services", timeout=SERVICES_TIMEOUT_SECONDS)
+    r.raise_for_status()
+    return r.json()
 
 
 @mcp.tool()
@@ -140,14 +283,19 @@ async def gateway_service(service: str) -> dict[str, Any]:
     Args:
         service: Service ID (e.g. 'paperless', 'firefly', 'coolify', 'github', 'nextcloud', 'outline', 'n8n')
     """
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.get(f"{GATEWAY_URL}/services/{service}", headers=headers)
-        r.raise_for_status()
-        return r.json()
+    r = await _request("GET", f"/services/{service}", timeout=SERVICES_TIMEOUT_SECONDS)
+    r.raise_for_status()
+    return r.json()
 
 
 @mcp.tool()
-async def gateway_execute(service: str, action: str, params: dict | None = None, body: dict | None = None) -> dict[str, Any]:
+async def gateway_execute(
+    service: str,
+    action: str,
+    params: dict | None = None,
+    body: dict | None = None,
+    fields: list[str] | str | None = None,
+) -> dict[str, Any]:
     """Execute an action on a service through the gateway.
 
     Args:
@@ -155,11 +303,20 @@ async def gateway_execute(service: str, action: str, params: dict | None = None,
         action: Endpoint action ID (e.g. 'list_documents', 'search_transactions')
         params: URL/path parameters as key-value pairs (e.g. {"id": "123", "page_size": 10})
         body: Request body for POST/PUT/PATCH endpoints (e.g. {"title": "New doc"})
+        fields: Optional. Nur diese Pfade aus data zurueckgeben (wie gw --fields), als Liste
+            oder kommagetrennter String. Punkt-Pfade relativ zu data, Ganzzahl-Segmente
+            indizieren Listen (events.0.event.result), fehlende Pfade -> null. data wird zu
+            {pfad: wert}; service, action, status_code bleiben. Nicht gefiltert werden
+            Antworten mit status_code ausserhalb 2xx und gated-Antworten.
+            Beispiel: service='claude_bridge', action='get_job', params={'job_id': '...'},
+            fields=['status', 'summary.events_count']
+            -> data == {'status': 'done', 'summary.events_count': 42}
 
     Grosse Uploads/Downloads werden abgelehnt (gated). Dann serverseitig arbeiten
     (Knoten service_cheatsheet, Feld sandbox_direktweg); Textdateien bewusst mit params.force=true.
     Kanal B (gw up / gw down) nur, wo verfuegbar.
     """
+    paths = parse_fields(fields)
     force = False
     if params and params.get("force") is True:
         force = True
@@ -177,10 +334,9 @@ async def gateway_execute(service: str, action: str, params: dict | None = None,
         payload["body"] = body
 
     try:
-        async with httpx.AsyncClient(timeout=GATEWAY_TIMEOUT_SECONDS) as client:
-            r = await client.post(f"{GATEWAY_URL}/execute", headers=headers, json=payload)
-            r.raise_for_status()
-            resp = r.json()
+        r = await _request("POST", "/execute", timeout=GATEWAY_TIMEOUT_SECONDS, json=payload)
+        r.raise_for_status()
+        resp = r.json()
     except httpx.TimeoutException:
         return _envelope(
             service, action, 504,
@@ -193,8 +349,31 @@ async def gateway_execute(service: str, action: str, params: dict | None = None,
         path = params.get("path") if params else None
         resp = gate_download(resp, path)
 
-    return resp
+    return apply_fields(resp, paths)
+
+
+# ---------------------------------------------------------------------------
+# ASGI-App: SSE (/sse, /messages/) und Streamable HTTP (/mcp) in einem Prozess
+# ---------------------------------------------------------------------------
+
+
+def build_app() -> Starlette:
+    sse = mcp.sse_app()
+    streamable = mcp.streamable_http_app()
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app: Starlette):
+        async with mcp.session_manager.run():
+            try:
+                yield
+            finally:
+                await close_clients()
+
+    return Starlette(routes=[*sse.routes, *streamable.routes], lifespan=lifespan)
 
 
 if __name__ == "__main__":
-    mcp.run(transport="sse")
+    import uvicorn
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    uvicorn.run(build_app(), host=mcp.settings.host, port=mcp.settings.port, log_level="info")
