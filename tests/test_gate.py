@@ -2,7 +2,6 @@
 
 import asyncio
 import os
-from unittest.mock import AsyncMock, MagicMock, patch
 
 os.environ.setdefault("GATEWAY_API_KEY", "test-key")
 
@@ -166,26 +165,26 @@ def test_download_pass_when_no_data_field():
 # ---------------------------------------------------------------------------
 
 
-def test_force_stripped_from_gateway_payload():
+def test_force_stripped_from_gateway_payload(monkeypatch):
     """force=True bypasses gates and must not be forwarded to the gateway."""
+    import json
+
+    import httpx
+
+    import app
+
     captured = {}
+    real_client = httpx.AsyncClient
 
-    async def _run():
-        resp_mock = MagicMock()
-        resp_mock.raise_for_status.return_value = None
-        resp_mock.json.return_value = {"encoding": "utf-8", "data": "ok"}
+    def handler(request):
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json={"encoding": "utf-8", "data": "ok"})
 
-        client_mock = AsyncMock()
-        client_mock.post = AsyncMock(return_value=resp_mock)
+    def factory(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_client(*args, **kwargs)
 
-        with patch("app.httpx.AsyncClient") as MockClient:
-            MockClient.return_value.__aenter__ = AsyncMock(return_value=client_mock)
-            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
-            await gateway_execute("svc", "act", params={"force": True, "id": "7"})
-
-        _, kwargs = client_mock.post.call_args
-        captured.update(kwargs["json"])
-
-    asyncio.run(_run())
+    monkeypatch.setattr(app.httpx, "AsyncClient", factory)
+    asyncio.run(gateway_execute("svc", "act", params={"force": True, "id": "7"}))
     assert "force" not in captured.get("params", {})
     assert captured["params"] == {"id": "7"}
