@@ -40,6 +40,9 @@ from typing import Any
 import httpx
 from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from starlette.routing import Route
 
 log = logging.getLogger("gateway-mcp")
 
@@ -357,6 +360,11 @@ async def gateway_execute(
 # ---------------------------------------------------------------------------
 
 
+async def health(_request: Request) -> JSONResponse:
+    """Liveness ohne Auth und ohne Upstream-Call (Gateway-Ausfall darf den Container nicht neu starten)."""
+    return JSONResponse({"status": "ok"})
+
+
 def build_app() -> Starlette:
     sse = mcp.sse_app()
     streamable = mcp.streamable_http_app()
@@ -369,7 +377,7 @@ def build_app() -> Starlette:
             finally:
                 await close_clients()
 
-    return Starlette(routes=[*sse.routes, *streamable.routes], lifespan=lifespan)
+    return Starlette(routes=[Route("/health", health, methods=["GET"]), *sse.routes, *streamable.routes], lifespan=lifespan)
 
 
 if __name__ == "__main__":

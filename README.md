@@ -14,6 +14,13 @@ Ein Prozess, Port 8000, zwei Transporte nebeneinander:
 einem Abbruch oder Neustart verwaisen (vgl. verwaiste SSE-Sitzungen, Befund S3476).
 Der Session-Manager startet im Lifespan der gemeinsamen Starlette-App (`build_app()`).
 
+## Healthcheck
+
+`GET /health` (Port 8000, ohne Auth) liefert `200 {"status":"ok"}`. Reiner Liveness-Check ohne
+Aufruf des api-gateway, damit ein Gateway-Ausfall den MCP-Container nicht neu startet.
+Das Image enthält `curl`; Coolify-Befehl z. B. `curl -f http://localhost:8000/health`.
+Im Dockerfile ist bewusst kein `HEALTHCHECK` gesetzt, Coolify steuert den Check.
+
 ## fields-Filter
 
 `gateway_execute(..., fields=[...])` gibt statt der vollen `data` nur die genannten Pfade zurück,
