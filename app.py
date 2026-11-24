@@ -5,6 +5,15 @@ Replaces 170+ individual MCP tool definitions with:
   1. gateway_services - list all available services
   2. gateway_service - get detail for one service
   3. gateway_execute - execute any endpoint on any service
+
+Timeout-Kette (gateway_execute):
+  Gateway ssh: connect_timeout 10 s + SSH_TIMEOUT 60 s = bis ~70 s, danach 504 vom Gateway
+  < MCP-Proxy: GATEWAY_TIMEOUT_SECONDS (Default 90 s)
+  < Cloudflare: 100 s
+Der Proxy wartet also laenger als das laengste Gateway-Budget, damit dessen saubere
+504-Antwort beim Client ankommt, bleibt aber unter der Cloudflare-Grenze.
+Timeouts und HTTP-Fehler kommen als Umschlag-Dict zurueck, nicht als Exception
+(ein leeres 'Error:' im MCP-Client war vorher das Bild eines Proxy-Timeouts).
 """
 
 import os
@@ -14,6 +23,10 @@ from mcp.server.fastmcp import FastMCP
 
 GATEWAY_URL = os.environ.get("GATEWAY_URL", "https://api-gateway.kailohmann.de")
 GATEWAY_KEY = os.environ["GATEWAY_API_KEY"]
+
+# httpx timeout fuer gateway_execute (s), Default 90: > Gateway ssh 10+60 s, < Cloudflare 100 s
+GATEWAY_TIMEOUT_SECONDS = float(os.environ.get("GATEWAY_TIMEOUT_SECONDS", "90"))
+ERROR_TEXT_MAX_CHARS = 500
 
 GATE_ENABLED = os.environ.get("GATE_ENABLED", "true").lower() != "false"
 GATE_UPLOAD_CHARS = int(os.environ.get("GATE_UPLOAD_CHARS", "4096"))
@@ -91,6 +104,23 @@ def gate_download(
     }
 
 
+def _envelope(service: str, action: str, status_code: int, data: str) -> dict[str, Any]:
+    """Response dict in the gateway's envelope format (used for proxy-side errors)."""
+    return {
+        "service": service,
+        "action": action,
+        "status_code": status_code,
+        "data": data,
+        "encoding": None,
+        "filename": None,
+        "content_type": None,
+    }
+
+
+def _fmt_seconds(n: float) -> str:
+    return str(int(n)) if float(n).is_integer() else str(n)
+
+
 @mcp.tool()
 async def gateway_services() -> dict[str, Any]:
     """List all available services and their endpoints.
@@ -146,10 +176,18 @@ async def gateway_execute(service: str, action: str, params: dict | None = None,
     if body:
         payload["body"] = body
 
-    async with httpx.AsyncClient(timeout=60) as client:
-        r = await client.post(f"{GATEWAY_URL}/execute", headers=headers, json=payload)
-        r.raise_for_status()
-        resp = r.json()
+    try:
+        async with httpx.AsyncClient(timeout=GATEWAY_TIMEOUT_SECONDS) as client:
+            r = await client.post(f"{GATEWAY_URL}/execute", headers=headers, json=payload)
+            r.raise_for_status()
+            resp = r.json()
+    except httpx.TimeoutException:
+        return _envelope(
+            service, action, 504,
+            f"MCP-Proxy-Timeout nach {_fmt_seconds(GATEWAY_TIMEOUT_SECONDS)} s; der Aufruf kann im Gateway weiterlaufen",
+        )
+    except httpx.HTTPStatusError as e:
+        return _envelope(service, action, e.response.status_code, e.response.text[:ERROR_TEXT_MAX_CHARS])
 
     if GATE_ENABLED and not force:
         path = params.get("path") if params else None

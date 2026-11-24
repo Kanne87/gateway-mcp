@@ -55,3 +55,22 @@ Enthält `params.path` einen Wert, wird er direkt in den Hint eingesetzt.
 
 - Upload: `gw up <lokal> <nc-pfad>` oder `POST $GW/upload` multipart
 - Download: `gw down <nc-pfad> -o <lokal>` oder `POST $GW/download` (streamt rohe Bytes)
+
+## Timeout-Kette
+
+| Glied | Grenze |
+|-------|--------|
+| api-gateway, ssh | `connect_timeout` 10 s + `SSH_TIMEOUT` 60 s = bis ~70 s, dann eigene Antwort `status_code: 504` (`SSH command timed out`) |
+| MCP-Proxy (`gateway_execute`) | `GATEWAY_TIMEOUT_SECONDS`, Standard **90 s** |
+| Cloudflare | 100 s |
+
+Der Proxy wartet länger als das längste Budget des Gateways, damit dessen saubere 504-Antwort
+beim Client ankommt, und bleibt unter der Cloudflare-Grenze. `gateway_services` und
+`gateway_service` behalten 30 s.
+
+Fehler kommen bei `gateway_execute` als Umschlag-Dict statt als Exception (vorher sah der Client nur ein leeres `Error:`):
+
+- Proxy-Timeout: `status_code: 504`, `data: "MCP-Proxy-Timeout nach 90 s; der Aufruf kann im Gateway weiterlaufen"`
+- HTTP-Status ≠ 2xx vom Gateway (z. B. 502, Cloudflare 524): `status_code` = HTTP-Status, `data` = Antworttext, gekürzt auf 500 Zeichen
+
+`encoding`, `filename` und `content_type` sind dabei `null`.
