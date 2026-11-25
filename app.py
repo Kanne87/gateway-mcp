@@ -24,6 +24,11 @@ Weg zum Gateway (S4214):
   Je Ziel-URL gibt es genau einen httpx.AsyncClient mit Keep-Alive (lazy erzeugt, im Lifespan
   geschlossen), statt je Aufruf einen neuen TLS-Handshake.
 
+Client-Auth (S4215, optional):
+  MCP_CLIENT_TOKEN gesetzt -> /mcp braucht 'Authorization: Bearer <token>' oder 'X-API-Key: <token>'.
+  SSE (/sse, /messages/) nur zusaetzlich mit MCP_CLIENT_TOKEN_SSE=true. /health immer offen.
+  Leer/ungesetzt -> keine Pruefung (WARNING beim Start). Token wird nie geloggt.
+
 Transporte (beide im selben Prozess, Port 8000):
   SSE:             GET /sse + POST /messages/   (claude.ai-Connector, Bridge-Jobs)
   Streamable HTTP: POST/GET/DELETE /mcp         (stateless)
@@ -33,6 +38,7 @@ fehlende Pfade -> null; data wird zu {pfad: wert}. Semantik wie gw-CLI --fields.
 """
 
 import contextlib
+import hmac
 import logging
 import os
 from typing import Any
@@ -40,6 +46,7 @@ from typing import Any
 import httpx
 from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
@@ -364,6 +371,87 @@ async def health(_request: Request) -> JSONResponse:
     """Liveness ohne Auth und ohne Upstream-Call (Gateway-Ausfall darf den Container nicht neu starten)."""
     return JSONResponse({"status": "ok"})
 
+# ---------------------------------------------------------------------------
+# Client-Auth fuer eingehende MCP-Clients (S4215)
+# ---------------------------------------------------------------------------
+
+_MCP_PREFIXES = ("/mcp",)
+_SSE_PREFIXES = ("/sse", "/messages")
+
+
+def _path_matches(path: str, prefixes: tuple[str, ...]) -> bool:
+    """Exakter Pfad oder Unterpfad (/mcp, /mcp/, /mcp/x), nicht /mcpfoo."""
+    return any(path == p or path.startswith(p + "/") for p in prefixes)
+
+
+def _env_true(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+class ClientAuthMiddleware:
+    """Reine ASGI-Middleware (kein BaseHTTPMiddleware, damit SSE-Streams ungepuffert bleiben).
+
+    Prueft nur HTTP-Requests auf geschuetzten Pfaden; lifespan und alles andere geht durch.
+    """
+
+    def __init__(self, app: Any, token: str, protect_sse: bool = False) -> None:
+        self.app = app
+        self._token = token.encode("utf-8")
+        self._prefixes = _MCP_PREFIXES + (_SSE_PREFIXES if protect_sse else ())
+
+    def _authorized(self, scope: dict) -> bool:
+        presented: list[bytes] = []
+        for name, value in scope.get("headers") or ():
+            if name == b"authorization":
+                scheme, _, cred = value.strip().partition(b" ")
+                if scheme.lower() == b"bearer":
+                    presented.append(cred.strip())
+            elif name == b"x-api-key":
+                presented.append(value.strip())
+        ok = False
+        for cand in presented:
+            # kein Kurzschluss: jeder Kandidat wird zeitkonstant verglichen
+            ok = hmac.compare_digest(cand, self._token) or ok
+        return ok
+
+    @staticmethod
+    def _client_ip(scope: dict) -> str:
+        hdrs = dict(scope.get("headers") or ())
+        for h in (b"cf-connecting-ip", b"x-forwarded-for", b"x-real-ip"):
+            v = hdrs.get(h)
+            if v:
+                return v.decode("latin-1").split(",")[0].strip()
+        client = scope.get("client")
+        return client[0] if client else "-"
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http" or not _path_matches(scope.get("path", ""), self._prefixes):
+            await self.app(scope, receive, send)
+            return
+        if self._authorized(scope):
+            await self.app(scope, receive, send)
+            return
+        # Nur Pfad und Client-IP loggen, nie Header oder Token
+        log.warning("gateway-mcp: 401 unauthorized path=%s client=%s", scope.get("path", ""), self._client_ip(scope))
+        resp = JSONResponse({"error": "unauthorized"}, status_code=401, headers={"WWW-Authenticate": "Bearer"})
+        await resp(scope, receive, send)
+
+
+def client_auth_middleware() -> list[Middleware]:
+    """Middleware-Liste aus der Umgebung (beim Bau der App gelesen)."""
+    token = os.environ.get("MCP_CLIENT_TOKEN", "").strip()
+    if not token:
+        log.warning(
+            "gateway-mcp: MCP_CLIENT_TOKEN nicht gesetzt - eingehende Clients werden NICHT authentifiziert (/mcp, /sse offen)"
+        )
+        return []
+    protect_sse = _env_true("MCP_CLIENT_TOKEN_SSE")
+    log.info(
+        "gateway-mcp: Client-Auth aktiv fuer /mcp%s",
+        ", /sse, /messages" if protect_sse else " (SSE offen, MCP_CLIENT_TOKEN_SSE nicht gesetzt)",
+    )
+    return [Middleware(ClientAuthMiddleware, token=token, protect_sse=protect_sse)]
+
 
 def build_app() -> Starlette:
     sse = mcp.sse_app()
@@ -377,7 +465,11 @@ def build_app() -> Starlette:
             finally:
                 await close_clients()
 
-    return Starlette(routes=[Route("/health", health, methods=["GET"]), *sse.routes, *streamable.routes], lifespan=lifespan)
+    return Starlette(
+        routes=[Route("/health", health, methods=["GET"]), *sse.routes, *streamable.routes],
+        middleware=client_auth_middleware(),
+        lifespan=lifespan,
+    )
 
 
 if __name__ == "__main__":

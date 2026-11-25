@@ -14,9 +14,42 @@ Ein Prozess, Port 8000, zwei Transporte nebeneinander:
 einem Abbruch oder Neustart verwaisen (vgl. verwaiste SSE-Sitzungen, Befund S3476).
 Der Session-Manager startet im Lifespan der gemeinsamen Starlette-App (`build_app()`).
 
+## Client-Auth
+
+Optionale Token-Prüfung für eingehende MCP-Clients (S4215). Ohne sie kann jeder, der die URL
+kennt, alle Gateway-Dienste nutzen, auch `ssh` und Mandantendaten.
+
+| Env-Var | Standard | Bedeutung |
+|---------|----------|-----------|
+| `MCP_CLIENT_TOKEN` | leer | Leer oder ungesetzt: keine Prüfung (wie bisher), beim Start kommt eine WARNING-Logzeile. Gesetzt: `/mcp` ist geschützt. |
+| `MCP_CLIENT_TOKEN_SSE` | `false` | `true` schützt zusätzlich `/sse` und `/messages/`. Wirkt nur, wenn `MCP_CLIENT_TOKEN` gesetzt ist. |
+
+Der Client schickt das Token in **einem** der beiden Header:
+
+```
+Authorization: Bearer <token>
+X-API-Key: <token>
+```
+
+- Geschützt sind alle Methoden auf `/mcp` und seinen Unterpfaden (mit Flag ebenso `/sse`, `/messages/…`).
+- Fehlt das Token oder ist es falsch, kommt `401 {"error":"unauthorized"}` mit
+  `WWW-Authenticate: Bearer`, ohne Aufruf des api-gateway.
+- `/health` bleibt immer offen.
+- Verglichen wird zeitkonstant (`hmac.compare_digest`). Das Token wird nie geloggt, auch nicht
+  gekürzt. Eine 401 wird nur mit Pfad und Client-IP geloggt
+  (`CF-Connecting-IP`, `X-Forwarded-For`, `X-Real-IP` oder Peer-Adresse).
+- Umgesetzt als reine ASGI-Middleware, also ohne Pufferung der SSE- und Streamable-HTTP-Antworten.
+
+**Rollout**
+
+1. `MCP_CLIENT_TOKEN` in Coolify setzen und deployen. Danach ist `/mcp` geschützt; den claude.ai-Connector
+   auf `/mcp` mit dem Header einrichten. Bridge-Jobs und der alte Connector laufen auf `/sse` weiter.
+2. Wenn alle SSE-Clients (Bridge-Konfiguration, alter Connector) den Header senden oder auf `/mcp`
+   umgestellt sind: `MCP_CLIENT_TOKEN_SSE=true` setzen.
+
 ## Healthcheck
 
-`GET /health` (Port 8000, ohne Auth) liefert `200 {"status":"ok"}`. Reiner Liveness-Check ohne
+`GET /health` (Port 8000, immer ohne Auth, auch mit `MCP_CLIENT_TOKEN`) liefert `200 {"status":"ok"}`. Reiner Liveness-Check ohne
 Aufruf des api-gateway, damit ein Gateway-Ausfall den MCP-Container nicht neu startet.
 Das Image enthält `curl`; Coolify-Befehl z. B. `curl -f http://localhost:8000/health`.
 Im Dockerfile ist bewusst kein `HEALTHCHECK` gesetzt, Coolify steuert den Check.
