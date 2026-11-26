@@ -96,6 +96,17 @@ mit Zeitstempel (`<uuid>-<deploy-zeit>`) als Alias, die bloße App-UUID löst ni
 stabiler interner Name braucht erst einen festen Netzwerk-Alias am api-gateway; bis dahin
 bleibt `GATEWAY_URL_INTERNAL` ungesetzt.
 
+## Eval-Trockenmodus (S4242)
+
+Traegt die MCP-Anfrage den Header `X-Eval-Run` (nicht leer), reicht
+`gateway_execute` ihn unveraendert an `POST /execute` des Gateways weiter. Der
+Gateway laesst dann nur Aktionen seiner Lese-Allowlist zu
+(`app/eval_allowlist.yaml` im Repo api-gateway) und antwortet sonst mit
+HTTP 423. Diesen Rumpf (`{eval_blocked, service, action, eval_run, hinweis}`)
+liefert das Tool als `data` mit `status_code: 423`. Ohne Header aendert sich
+nichts. Eval-Sessions setzen den Header in ihrer MCP-Konfiguration
+(`headers: {"X-Eval-Run": "<lauf>"}`).
+
 ## Größen-Gate
 
 `gateway_execute` schützt den Modell-Kontext vor großen Byte-Lasten in beiden Richtungen.
