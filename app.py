@@ -44,7 +44,7 @@ import os
 from typing import Any
 
 import httpx
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.requests import Request
@@ -144,7 +144,7 @@ def gate_download(
     }
 
 
-def _envelope(service: str, action: str, status_code: int, data: str) -> dict[str, Any]:
+def _envelope(service: str, action: str, status_code: int, data: Any) -> dict[str, Any]:
     """Response dict in the gateway's envelope format (used for proxy-side errors)."""
     return {
         "service": service,
@@ -298,6 +298,24 @@ async def gateway_service(service: str) -> dict[str, Any]:
     return r.json()
 
 
+EVAL_HEADER = "X-Eval-Run"
+
+
+def _eval_run(ctx: Context | None) -> str | None:
+    """S4242: Wert des Headers X-Eval-Run der MCP-Anfrage (nicht leer), sonst None.
+
+    Eval-Sessions (claude-bridge, Eval-Harness) setzen den Header in ihrer
+    MCP-Konfiguration; der Gateway laesst dann nur Lesen zu (HTTP 423 sonst).
+    """
+    try:
+        request = ctx.request_context.request if ctx is not None else None
+        value = request.headers.get(EVAL_HEADER) if request is not None else None
+    except Exception:  # noqa: BLE001 - ausserhalb eines HTTP-Requests (stdio, Tests)
+        return None
+    value = (value or "").strip()
+    return value or None
+
+
 @mcp.tool()
 async def gateway_execute(
     service: str,
@@ -305,6 +323,7 @@ async def gateway_execute(
     params: dict | None = None,
     body: dict | None = None,
     fields: list[str] | str | None = None,
+    ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Execute an action on a service through the gateway.
 
@@ -343,8 +362,19 @@ async def gateway_execute(
     if body:
         payload["body"] = body
 
+    eval_run = _eval_run(ctx)
+    extra_headers = {EVAL_HEADER: eval_run} if eval_run else None
+
     try:
-        r = await _request("POST", "/execute", timeout=GATEWAY_TIMEOUT_SECONDS, json=payload)
+        r = await _request(
+            "POST", "/execute", timeout=GATEWAY_TIMEOUT_SECONDS, json=payload, headers=extra_headers,
+        )
+        if r.status_code == 423:
+            # S4242 Eval-Trockenmodus: Sperr-Rumpf {eval_blocked, ...} als data durchreichen.
+            try:
+                return _envelope(service, action, 423, r.json())
+            except ValueError:
+                pass
         r.raise_for_status()
         resp = r.json()
     except httpx.TimeoutException:
